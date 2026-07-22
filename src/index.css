@@ -1,0 +1,45 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&family=Outfit:wght@400;500;600;700;800&display=swap');
+@import "tailwindcss";
+
+@theme {
+  --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
+  --font-display: "Outfit", ui-sans-serif, system-ui, sans-serif;
+
+  --color-app-bg: #0B1120;
+  --color-app-card: #111827;
+  --color-app-card-light: #1F2937;
+  --color-app-accent: #7C3AED;
+  --color-app-accent-blue: #4F46E5;
+  --color-app-cyan: #22D3EE;
+  --color-app-text-p: #FFFFFF;
+  --color-app-text-s: #94A3B8;
+  --color-app-line: #1F2937;
+  --color-app-success: #22C55E;
+  --color-app-warning: #F59E0B;
+}
+
+body {
+  @apply font-sans bg-app-bg text-app-text-p antialiased;
+  background-image: 
+    radial-gradient(circle at 0% 0%, rgba(124, 58, 237, 0.05) 0%, transparent 50%),
+    radial-gradient(circle at 100% 100%, rgba(79, 70, 229, 0.05) 0%, transparent 50%);
+}
+
+h1, h2, h3, h4 {
+  @apply font-display font-bold;
+}
+
+/* Custom scrollbar matching dark theme */
+::-webkit-scrollbar {
+  width: 8px;
+}
+::-webkit-scrollbar-track {
+  @apply bg-app-bg;
+}
+::-webkit-scrollbar-thumb {
+  @apply bg-app-line rounded-full;
+}
+::-webkit-scrollbar-thumb:hover {
+  @apply bg-app-text-s/30;
+}
+

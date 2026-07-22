@@ -1,0 +1,6 @@
+{
+  "name": "Jumic",
+  "description": "Sistema de gestión de karaoke moderno con registro por QR y cola equitativa.",
+  "requestFramePermissions": [],
+  "majorCapabilities": []
+}

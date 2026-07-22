@@ -1,0 +1,100 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    
+    // -------------------------------------------------------------------------
+    // GLOBAL HELPERS
+    // -------------------------------------------------------------------------
+    
+    function isSignedIn() {
+      return request.auth != null;
+    }
+    
+    function isAdmin() {
+      return isSignedIn() && exists(/databases/$(database)/documents/admins/$(request.auth.uid));
+    }
+    
+    function isValidId(id) {
+      return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+    
+    function incoming() {
+      return request.resource.data;
+    }
+    
+    function existing() {
+      return resource.data;
+    }
+
+    // -------------------------------------------------------------------------
+    // DEFAULT DENY
+    // -------------------------------------------------------------------------
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // -------------------------------------------------------------------------
+    // TABLES COLLECTION
+    // -------------------------------------------------------------------------
+    match /tables/{tableId} {
+      allow get: if isValidId(tableId);
+      allow list: if isSignedIn(); // DJ needs to list tables
+      
+      allow create, update: if isAdmin() && isValidTable(incoming());
+      allow delete: if isAdmin();
+      
+      function isValidTable(data) {
+        return data.keys().hasAll(['id', 'name', 'isActive', 'songsSungCount']) 
+          && data.keys().size() == 4
+          && data.id is string && data.id.size() <= 64
+          && data.name is string && data.name.size() <= 100
+          && data.isActive is bool
+          && data.songsSungCount is int && data.songsSungCount >= 0;
+      }
+    }
+
+    // -------------------------------------------------------------------------
+    // SONG REQUESTS COLLECTION
+    // -------------------------------------------------------------------------
+    match /songRequests/{requestId} {
+      allow get: if isValidId(requestId) && (isSignedIn() || (resource != null && resource.data.status == 'pending'));
+      allow list: if isSignedIn(); // DJ lists all
+      
+      // Public can create requests if the table is active
+      allow create: if isValidSongRequest(incoming()) 
+        && get(/databases/$(database)/documents/tables/$(incoming().tableId)).data.isActive == true;
+      
+      // Only DJ can update status
+      allow update: if (isAdmin() || isStatusUpdateByTable(requestId)) && isValidSongRequest(incoming());
+      
+      allow delete: if isAdmin();
+
+      function isValidSongRequest(data) {
+        return data.keys().hasAll(['id', 'tableId', 'singerName', 'songTitle', 'artistName', 'status', 'createdAt'])
+          && data.keys().size() >= 7 && data.keys().size() <= 8
+          && data.id is string && data.id.size() <= 64
+          && data.tableId is string && data.tableId.size() <= 64
+          && data.singerName is string && data.singerName.size() <= 100
+          && data.songTitle is string && data.songTitle.size() <= 200
+          && data.artistName is string && data.artistName.size() <= 200
+          && data.status in ['pending', 'singing', 'sung', 'removed']
+          && data.createdAt is int;
+      }
+      
+      function isStatusUpdateByTable(requestId) {
+        // Technically tables don't have auth here yet, so we restrict updates to DJ for now
+        // But we could allow a "removal" if we had a way to verify the table.
+        // For this demo, only DJ updates.
+        return false; 
+      }
+    }
+
+    // -------------------------------------------------------------------------
+    // ADMINS COLLECTION
+    // -------------------------------------------------------------------------
+    match /admins/{uid} {
+      allow read: if isSignedIn() && request.auth.uid == uid;
+      allow write: if false; // Provisioned via console or specific script
+    }
+  }
+}

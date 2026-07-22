@@ -1,0 +1,46 @@
+{
+  "entities": {
+    "Table": {
+      "title": "Table",
+      "description": "Represents a physical table in the karaoke venue.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "isActive": { "type": "boolean" },
+        "songsSungCount": { "type": "integer" }
+      },
+      "required": ["id", "name", "isActive", "songsSungCount"]
+    },
+    "SongRequest": {
+      "title": "Song Request",
+      "description": "A request for a song made by a table.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "tableId": { "type": "string" },
+        "singerName": { "type": "string" },
+        "songTitle": { "type": "string" },
+        "artistName": { "type": "string" },
+        "status": { "type": "string", "enum": ["pending", "singing", "sung", "removed"] },
+        "createdAt": { "type": "integer" },
+        "completedAt": { "type": "integer" }
+      },
+      "required": ["id", "tableId", "singerName", "songTitle", "artistName", "status", "createdAt"]
+    }
+  },
+  "firestore": {
+    "/tables/{tableId}": {
+      "schema": "Table",
+      "description": "Information about karaoke tables."
+    },
+    "/songRequests/{requestId}": {
+      "schema": "SongRequest",
+      "description": "Queue of songs requested by the tables."
+    },
+    "/admins/{uid}": {
+      "schema": { "type": "object", "properties": { "email": { "type": "string" } } },
+      "description": "Registered DJ/Admin users."
+    }
+  }
+}
