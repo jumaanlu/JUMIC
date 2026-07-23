@@ -3,6 +3,7 @@ export interface Table {
   name: string;
   isActive: boolean;
   songsSungCount: number;
+  pendingSongCount?: number;
   lastSungAt?: number;
   joinedAt?: number;
 }
@@ -13,7 +14,7 @@ export interface SongRequest {
   singerName: string;
   songTitle: string;
   artistName: string;
-  status: 'pending' | 'singing' | 'sung' | 'removed';
+  status: 'pending' | 'singing' | 'sung' | 'no_show' | 'removed';
   createdAt: number;
   completedAt?: number;
   logicalRound?: number;

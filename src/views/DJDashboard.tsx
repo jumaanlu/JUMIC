@@ -6,7 +6,6 @@ import {
   Music, 
   Mic2, 
   Users, 
-  Settings, 
   Play, 
   CheckCircle2,
   Clock,
@@ -18,7 +17,8 @@ import {
   Bell,
   History,
   Trash2,
-  AlertTriangle
+  AlertTriangle,
+  UserX
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { DJLayout } from '../components/DJLayout';
@@ -26,7 +26,7 @@ import { cn } from '../lib/utils';
 import { Link, useNavigate } from 'react-router-dom';
 
 export const DJDashboard = () => {
-  const { stats, fairQueue, markAsSung, removeSong, tables, addSongRequest, queue, resetSystem } = useKaraoke();
+  const { stats, fairQueue, markAsSung, markNoShow, tables, addSongRequest, queue, resetSystem } = useKaraoke();
   const navigate = useNavigate();
 
   const [showAddModal, setShowAddModal] = React.useState(false);
@@ -37,15 +37,45 @@ export const DJDashboard = () => {
   const [isSyncing, setIsSyncing] = React.useState(false);
   const [isResetting, setIsResetting] = React.useState(false);
 
+  const formatDate = (timestamp?: number) => timestamp
+    ? new Date(timestamp).toLocaleDateString('es-MX')
+    : '---';
+
+  const formatTime = (timestamp?: number) => timestamp
+    ? new Date(timestamp).toLocaleTimeString('es-MX', {
+        hour: '2-digit',
+        minute: '2-digit',
+        second: '2-digit',
+        hour12: true
+      })
+    : '---';
+
+  const waitMinutes = (createdAt: number, completedAt?: number) => completedAt
+    ? Math.max(0, Math.round((completedAt - createdAt) / 60000))
+    : null;
+
+  const statusLabel = (status: string) => {
+    switch (status) {
+      case 'pending': return 'Pendiente';
+      case 'singing': return 'Cantando';
+      case 'sung': return 'Cantó';
+      case 'no_show': return 'No Show';
+      case 'removed': return 'Eliminada (registro anterior)';
+      default: return status;
+    }
+  };
+
   const exportToCSV = () => {
     const headers = [
       'Mesa',
       'Cantante',
       'Canción',
       'Artista',
-      'Estado',
+      'Resultado',
+      'Fecha de Solicitud',
       'Hora de Solicitud',
-      'Hora que se Cantó',
+      'Fecha de Atención',
+      'Hora de Atención',
       'Tiempo de Espera (min)'
     ];
 
@@ -55,51 +85,19 @@ export const DJDashboard = () => {
         const table = tables.find(t => t.id === song.tableId);
         const tableName = table ? table.name : `Mesa ${song.tableId}`;
         
-        const reqDate = new Date(song.createdAt);
-        const requestTime = reqDate.toLocaleTimeString('es-MX', {
-          hour: '2-digit',
-          minute: '2-digit',
-          second: '2-digit',
-          hour12: true
-        });
-
-        let sungTime = '---';
-        let waitTime = '---';
-
-        if (song.completedAt) {
-          const complDate = new Date(song.completedAt);
-          sungTime = complDate.toLocaleTimeString('es-MX', {
-            hour: '2-digit',
-            minute: '2-digit',
-            second: '2-digit',
-            hour12: true
-          });
-
-          const diffMs = song.completedAt - song.createdAt;
-          const diffMins = Math.round(diffMs / 60000);
-          waitTime = `${diffMins}`;
-        } else if (song.status === 'sung') {
-          sungTime = 'Sí (Hora no registrada)';
-        }
-
-        let statusText = '';
-        switch (song.status) {
-          case 'pending': statusText = 'Pendiente'; break;
-          case 'singing': statusText = 'Cantando'; break;
-          case 'sung': statusText = 'Cantada'; break;
-          case 'removed': statusText = 'Eliminada'; break;
-          default: statusText = song.status;
-        }
+        const elapsedMinutes = waitMinutes(song.createdAt, song.completedAt);
 
         return [
           tableName,
           song.singerName,
           song.songTitle,
           song.artistName,
-          statusText,
-          requestTime,
-          sungTime,
-          waitTime
+          statusLabel(song.status),
+          formatDate(song.createdAt),
+          formatTime(song.createdAt),
+          formatDate(song.completedAt),
+          formatTime(song.completedAt),
+          elapsedMinutes ?? '---'
         ];
       });
 
@@ -170,7 +168,7 @@ export const DJDashboard = () => {
 
   return (
     <DJLayout>
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 mb-10">
+      <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-5 gap-5 mb-10">
         <StatCard 
           title="QUEUE STATUS" 
           value={stats.pending} 
@@ -178,23 +176,28 @@ export const DJDashboard = () => {
           description="CANCIONES EN ESPERA"
         />
         <StatCard 
-          title="PRODUCCIÓN" 
+          title="CANTARON"
           value={stats.completed} 
           icon={<CheckCircle2 className="w-5 h-5 text-app-success" />}
-          description="TEMAS FINALIZADOS"
+          description="TURNOS COMPLETADOS"
+        />
+        <StatCard
+          title="NO SHOW"
+          value={stats.noShows}
+          icon={<UserX className="w-5 h-5 text-red-400" />}
+          description="TURNOS NO PRESENTADOS"
+        />
+        <StatCard
+          title="ESPERA PROMEDIO"
+          value={`${stats.averageWaitMinutes} min`}
+          icon={<Clock className="w-5 h-5 text-app-cyan" />}
+          description={`${stats.turnsConsumed} TURNOS ATENDIDOS`}
         />
         <StatCard 
-          title="DENSIDAD" 
+          title="MESAS"
           value={stats.activeTables} 
           icon={<Users className="w-5 h-5 text-app-cyan" />}
           description="MESAS EN SESIÓN"
-        />
-        <StatCard 
-          title="SISTEMA" 
-          value="AUTOMÁTICO" 
-          icon={<Settings className="w-5 h-5 text-app-accent" />}
-          color="bg-linear-to-br from-app-card to-app-accent/5"
-          description="GESTIÓN DE TURNOS ACTIVA"
         />
       </div>
 
@@ -316,35 +319,40 @@ export const DJDashboard = () => {
                             
                             <div className="flex items-center gap-6">
                               <div className="text-right hidden md:block border-r border-app-line/50 pr-6 mr-2">
-                                <div className="text-[9px] text-app-text-s/40 font-black uppercase tracking-[0.2em] mb-1">RONDA VIRTUAL</div>
+                                <div className="text-[9px] text-app-text-s/40 font-black uppercase tracking-[0.2em] mb-1">RONDA</div>
                                 <div className="text-lg font-black text-white tabular-nums drop-shadow-[0_0_10px_rgba(255,255,255,0.1)]">#{logicalRound}</div>
                               </div>
                               
                               <div className="flex items-center gap-2">
-                                <Button 
-                                  onClick={() => markAsSung(song.id)}
-                                  variant={isNext ? "primary" : "secondary"}
-                                  size={isNext ? "md" : "icon"}
-                                  className={cn(isNext ? "px-6" : "h-11 w-11 rounded-xl")}
-                                >
-                                  {isNext ? (
+                                {isNext && (
+                                  <Button
+                                    onClick={() => markAsSung(song.id)}
+                                    variant="primary"
+                                    size="md"
+                                    className="px-6"
+                                  >
                                     <span className="flex items-center gap-2 uppercase tracking-[0.15em] text-[10px]">
                                       <CheckCircle2 className="w-4 h-4" />
                                       COMPLETAR
                                     </span>
-                                  ) : (
-                                    <CheckCircle2 className="w-4 h-4 text-app-success" />
-                                  )}
-                                </Button>
+                                  </Button>
+                                )}
                                 
-                                {!isNext && (
-                                  <Button 
-                                    size="icon" 
-                                    variant="secondary" 
-                                    onClick={() => removeSong(song.id)} 
-                                    className="h-11 w-11 rounded-xl group-hover:bg-red-500/10 group-hover:text-red-500 transition-colors"
+                                {isNext && (
+                                  <Button
+                                    size="sm"
+                                    variant="secondary"
+                                    onClick={() => {
+                                      if (window.confirm(`¿Marcar a ${song.singerName} como NO SHOW? Contará como turno consumido y liberará un espacio para la mesa.`)) {
+                                        markNoShow(song.id);
+                                      }
+                                    }}
+                                    className="h-8 px-2.5 rounded-lg bg-red-500/10 text-red-400 border border-red-500/20 hover:bg-red-500 hover:text-white transition-colors"
                                   >
-                                    <Trash2 className="w-4 h-4" />
+                                    <span className="flex items-center gap-1.5 text-[8px] font-black tracking-widest">
+                                      <UserX className="w-3 h-3" />
+                                      NO SHOW
+                                    </span>
                                   </Button>
                                 )}
                               </div>
@@ -367,7 +375,7 @@ export const DJDashboard = () => {
                           <History className="w-4 h-4 text-app-accent" />
                           Historial Completo del Evento
                         </h3>
-                        <p className="text-[10px] text-app-text-s/60 mt-1 uppercase tracking-wider font-bold">Registro de solicitudes procesadas y canciones finalizadas</p>
+                        <p className="text-[10px] text-app-text-s/60 mt-1 uppercase tracking-wider font-bold">Quién cantó, cuándo solicitó y cuándo fue atendido</p>
                       </div>
                       {queue.length > 0 && (
                         <Button 
@@ -388,21 +396,33 @@ export const DJDashboard = () => {
                             <div key={table.id} className="border-b border-app-line last:border-0">
                                 <div className="bg-app-bg/30 px-6 py-2 text-[10px] font-black uppercase tracking-widest text-app-text-s flex justify-between items-center">
                                     <span>{table.name}</span>
-                                    <span>{tableSongs.length} canciones</span>
+                                    <span>{tableSongs.length} turnos</span>
                                 </div>
                                 <div className="divide-y divide-app-line/30">
                                     {tableSongs.sort((a, b) => (b.completedAt || 0) - (a.completedAt || 0)).map(song => (
-                                        <div key={song.id} className="px-6 py-3 flex justify-between items-center">
-                                            <div>
+                                        <div key={song.id} className="px-6 py-4 flex flex-col lg:flex-row lg:justify-between lg:items-center gap-3">
+                                            <div className="min-w-0">
                                                 <div className="text-xs font-bold text-app-text-p">{song.songTitle}</div>
                                                 <div className="text-[10px] text-app-text-s">{song.artistName} • {song.singerName}</div>
                                             </div>
-                                            <div className="flex items-center gap-2">
+                                            <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
+                                                <div className="text-[9px] text-app-text-s uppercase tracking-wider">
+                                                  <span className="opacity-50">Solicitud</span>
+                                                  <strong className="block text-app-text-p mt-0.5">{formatTime(song.createdAt)}</strong>
+                                                </div>
+                                                <div className="text-[9px] text-app-text-s uppercase tracking-wider">
+                                                  <span className="opacity-50">Atención</span>
+                                                  <strong className="block text-app-text-p mt-0.5">{formatTime(song.completedAt)}</strong>
+                                                </div>
+                                                <div className="text-[9px] text-app-text-s uppercase tracking-wider">
+                                                  <span className="opacity-50">Espera</span>
+                                                  <strong className="block text-app-text-p mt-0.5">{waitMinutes(song.createdAt, song.completedAt) ?? '---'} min</strong>
+                                                </div>
                                                 <span className={cn(
                                                     "text-[9px] font-bold px-2 py-0.5 rounded uppercase tracking-widest",
                                                     song.status === 'sung' ? "bg-app-success/10 text-app-success" : "bg-red-500/10 text-red-500"
                                                 )}>
-                                                    {song.status === 'sung' ? 'Cantada' : 'Eliminada'}
+                                                    {statusLabel(song.status)}
                                                 </span>
                                             </div>
                                         </div>
@@ -437,7 +457,7 @@ export const DJDashboard = () => {
             <div className="p-4 space-y-0 text-xs font-bold text-app-text-s uppercase tracking-widest grid grid-cols-[80px_1fr_40px_40px] px-6 border-b border-app-line/50">
                 <span>Mesa</span>
                 <span>Estado</span>
-                <span className="text-center">Cant.</span>
+                <span className="text-center">Turnos</span>
                 <span className="text-center">Pend.</span>
             </div>
 

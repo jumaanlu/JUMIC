@@ -2,7 +2,7 @@ import React, { useState } from 'react';
 import { useParams } from 'react-router-dom';
 import { useKaraoke } from '../context/KaraokeContext';
 import { Button } from '../components/Button';
-import { Music, User, Store, Send, CheckCircle2, Clock, Info, XCircle } from 'lucide-react';
+import { Music, User, Store, Send, CheckCircle2, Clock, Info, XCircle, AlertTriangle } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { cn } from '../lib/utils';
 
@@ -11,6 +11,12 @@ export const PublicView = () => {
   const { tables, addSongRequest, isLoading, fairQueue, isSessionActive } = useKaraoke();
   
   const currentTable = tables.find(t => t.id === tableId);
+  const pendingSongCount = currentTable
+    ? Math.max(
+        currentTable.pendingSongCount || 0,
+        fairQueue.filter(request => request.tableId === currentTable.id).length
+      )
+    : 0;
   
   const [singerName, setSingerName] = useState('');
   const [songTitle, setSongTitle] = useState('');
@@ -84,22 +90,12 @@ export const PublicView = () => {
     setIsSubmitting(true);
 
     try {
-      await addSongRequest({
+      const nextRound = await addSongRequest({
         tableId: currentTable.id,
         singerName,
         songTitle,
         artistName,
       });
-      
-      // Calculate logical round for this specific request using the exact fair queue math
-      const tablePendingSongs = fairQueue.filter(q => q.tableId === currentTable.id);
-      const indexInTableQueue = tablePendingSongs.length; 
-      
-      const baseRound = tables.length > 0
-        ? Math.max(...tables.map(t => t.songsSungCount || 0)) + 1
-        : 1;
-        
-      const nextRound = baseRound + indexInTableQueue;
       setAssignedRound(nextRound);
       
       setSubmitted(true);
@@ -110,7 +106,11 @@ export const PublicView = () => {
       setTimeout(() => setSubmitted(false), 5000);
     } catch (err) {
       console.error("Error sending request:", err);
-      setError("No se pudo enviar la canción. Verifica tu conexión.");
+      setError(
+        err instanceof Error && err.message === 'QUEUE_LIMIT'
+          ? 'Tu mesa ya tiene 3 canciones pendientes. Podrás registrar otra cuando una sea completada o marcada como NO SHOW.'
+          : 'No se pudo enviar la canción. Verifica tu conexión.'
+      );
     } finally {
       setIsSubmitting(false);
     }
@@ -133,6 +133,31 @@ export const PublicView = () => {
           </div>
         </header>
 
+        <AnimatePresence>
+          {pendingSongCount >= 3 && (
+            <motion.div
+              role="alert"
+              aria-live="assertive"
+              initial={{ opacity: 0, scale: 0.94, y: -12 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.94, y: -12 }}
+              className="mb-6 overflow-hidden rounded-[2rem] border-2 border-red-500 bg-red-500/15 shadow-[0_0_45px_rgba(239,68,68,0.35)]"
+            >
+              <div className="h-2 bg-red-500 animate-pulse" />
+              <div className="p-6 text-center">
+                <div className="w-16 h-16 mx-auto mb-4 rounded-full bg-red-500 text-white flex items-center justify-center ring-8 ring-red-500/15">
+                  <AlertTriangle className="w-9 h-9" />
+                </div>
+                <p className="text-[10px] font-black uppercase tracking-[0.3em] text-red-300 mb-2">Atención</p>
+                <h2 className="text-xl font-black uppercase tracking-tight text-white">Límite de 3 canciones alcanzado</h2>
+                <p className="mt-3 text-xs leading-relaxed font-bold text-red-100">
+                  Ya no puedes agregar más canciones. Podrás registrar otra cuando una canción sea completada o marcada como NO SHOW.
+                </p>
+              </div>
+            </motion.div>
+          )}
+        </AnimatePresence>
+
         <AnimatePresence mode="wait">
           {!submitted ? (
             <motion.div
@@ -145,6 +170,7 @@ export const PublicView = () => {
               <div className="space-y-1">
                 <h2 className="text-xl font-bold uppercase tracking-tight">Registro de Canción</h2>
                 <p className="text-[10px] text-app-text-s font-bold uppercase tracking-widest opacity-60">Completa los detalles para entrar a la lista</p>
+                <p className="text-[9px] text-app-accent font-black uppercase tracking-widest pt-2">{pendingSongCount} de 3 canciones pendientes</p>
               </div>
               
               <form onSubmit={handleSubmit} className="space-y-6">
@@ -202,10 +228,12 @@ export const PublicView = () => {
                 <div className="pt-4">
                   <Button 
                     type="submit" 
-                    disabled={isSubmitting}
+                    disabled={isSubmitting || pendingSongCount >= 3}
                     className="w-full h-14 rounded-2xl text-[11px] font-black uppercase tracking-[0.2em] gap-3"
                   >
-                    {isSubmitting ? (
+                    {pendingSongCount >= 3 ? (
+                        <>Límite de canciones alcanzado</>
+                    ) : isSubmitting ? (
                         <>Iniciando Transmisión...</>
                     ) : (
                         <>
@@ -309,7 +337,7 @@ export const PublicView = () => {
                       <div className="text-app-accent font-black text-lg select-none">•</div>
                       <div>
                         <h4 className="text-[11px] font-black uppercase tracking-widest mb-1">Si llegas tarde</h4>
-                        <p className="text-[10px] text-app-text-s font-semibold uppercase tracking-widest leading-relaxed opacity-70">Te integramos automáticamente al turno actual para que participes lo antes posible, respetando a los que ya están esperando.</p>
+                        <p className="text-[10px] text-app-text-s font-semibold uppercase tracking-widest leading-relaxed opacity-70">Tu primera canción entra al final de la ronda actual. Las siguientes pasan a las rondas posteriores, igual que las demás mesas.</p>
                       </div>
                     </div>
 
@@ -318,13 +346,14 @@ export const PublicView = () => {
                         <span className="text-sm">💡</span>
                         <p className="text-[9px] font-black uppercase tracking-widest">Importante:</p>
                       </div>
-                      <p className="text-[9px] text-app-text-s font-bold uppercase tracking-widest opacity-60">El orden puede variar ligeramente para mantener la dinámica justa para todos.</p>
+                      <p className="text-[9px] text-app-text-s font-bold uppercase tracking-widest opacity-60">Una vez asignada, tu canción conserva su ronda y no obtiene ventaja por llegar tarde.</p>
+                      <p className="text-[9px] text-app-text-s font-bold uppercase tracking-widest opacity-60">Cada mesa puede mantener hasta 3 canciones pendientes. Al completarse una, se libera un espacio.</p>
                       
                       <div className="flex items-center gap-2 pt-2 border-t border-app-line/30">
                         <span className="text-sm">🔹</span>
                         <p className="text-[9px] font-black uppercase tracking-widest text-app-accent">Nota del Sistema:</p>
                       </div>
-                      <p className="text-[9px] text-app-text-s font-bold uppercase tracking-widest opacity-60">Asignación automática y equitativa garantizada.</p>
+                      <p className="text-[9px] text-app-text-s font-bold uppercase tracking-widest opacity-60">Una canción por mesa en cada ronda. Nadie repite seguido mientras otra mesa esté esperando.</p>
                     </div>
                   </div>
 

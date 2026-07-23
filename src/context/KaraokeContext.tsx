@@ -1,25 +1,21 @@
 import React, { createContext, useContext, useState, useEffect, ReactNode } from 'react';
 import { Table, SongRequest, KaraokeState } from '../types';
-import { getNextSongs } from '../utils/fairQueue';
+import { getNextSongs, getProjectedRound } from '../utils/fairQueue';
 import { db, auth } from '../lib/firebase';
 import { 
   collection, 
   onSnapshot, 
-  query, 
-  where, 
-  orderBy, 
-  addDoc, 
   doc, 
+  getDoc,
   updateDoc,
   setDoc,
-  deleteDoc,
   writeBatch,
   getDocs,
-  deleteField
+  deleteField,
+  runTransaction
 } from 'firebase/firestore';
 import { 
   signInWithEmailAndPassword, 
-  createUserWithEmailAndPassword,
   signInWithPopup,
   GoogleAuthProvider,
   signOut, 
@@ -28,15 +24,18 @@ import {
 } from 'firebase/auth';
 
 interface KaraokeContextType extends KaraokeState {
-  addSongRequest: (request: Omit<SongRequest, 'id' | 'status' | 'createdAt'>) => void;
+  addSongRequest: (request: Omit<SongRequest, 'id' | 'status' | 'createdAt'>) => Promise<number>;
   markAsSung: (songId: string) => void;
-  removeSong: (songId: string) => void;
+  markNoShow: (songId: string) => void;
   toggleTableStatus: (tableId: string) => void;
   addTable: (name: string) => void;
   fairQueue: SongRequest[];
   stats: {
     pending: number;
     completed: number;
+    noShows: number;
+    turnsConsumed: number;
+    averageWaitMinutes: number;
     activeTables: number;
   };
   isAuthenticated: boolean;
@@ -57,6 +56,7 @@ const INITIAL_TABLES: Table[] = Array.from({ length: 35 }, (_, i) => ({
   name: `Mesa ${i + 1}`,
   isActive: true,
   songsSungCount: 0,
+  pendingSongCount: 0,
 }));
 
 export const KaraokeProvider = ({ children }: { children: ReactNode }) => {
@@ -64,6 +64,7 @@ export const KaraokeProvider = ({ children }: { children: ReactNode }) => {
   const [queue, setQueue] = useState<SongRequest[]>([]);
   const [isSessionActive, setIsSessionActive] = useState(true);
   const [user, setUser] = useState<FirebaseUser | null>(null);
+  const [isAdminUser, setIsAdminUser] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
 
   // Sync Tables and Queue
@@ -73,10 +74,7 @@ export const KaraokeProvider = ({ children }: { children: ReactNode }) => {
       const tablesData = snap.docs.map(doc => doc.data() as Table);
       console.log(`Received ${tablesData.length} tables from Firestore`);
       
-      // If no tables in DB, bootstrap them (only for dev/first run)
-      if (tablesData.length === 0) {
-        bootstrapTables();
-      } else {
+      if (tablesData.length > 0) {
         setTables(tablesData.sort((a, b) => {
           const numA = parseInt(a.id.split('-')[1]) || 0;
           const numB = parseInt(b.id.split('-')[1]) || 0;
@@ -108,15 +106,27 @@ export const KaraokeProvider = ({ children }: { children: ReactNode }) => {
     const unsubSettings = onSnapshot(doc(db, 'settings', 'system'), (snap) => {
       if (snap.exists()) {
         setIsSessionActive(snap.data().isSessionActive);
-      } else {
-        // Init settings if they don't exist
-        setDoc(doc(db, 'settings', 'system'), { isSessionActive: true });
       }
     });
 
-    const unsubAuth = onAuthStateChanged(auth, (u) => {
+    const unsubAuth = onAuthStateChanged(auth, async (u) => {
       console.log("Auth state changed:", u?.email || "Guest");
+      if (!u) {
+        setUser(null);
+        setIsAdminUser(false);
+        return;
+      }
+
+      const adminSnapshot = await getDoc(doc(db, 'admins', u.uid));
+      if (!adminSnapshot.exists()) {
+        setUser(null);
+        setIsAdminUser(false);
+        await signOut(auth);
+        return;
+      }
+
       setUser(u);
+      setIsAdminUser(true);
     });
 
     return () => {
@@ -136,49 +146,94 @@ export const KaraokeProvider = ({ children }: { children: ReactNode }) => {
   };
 
   const addSongRequest = async (req: Omit<SongRequest, 'id' | 'status' | 'createdAt'>) => {
-    const tableId = req.tableId;
-    const table = tables.find(t => t.id === tableId);
-    const now = Date.now();
-
-    // Si la mesa no tiene joinedAt, se lo ponemos ahora (su primer request)
-    if (table && !table.joinedAt) {
-      const tableRef = doc(db, 'tables', table.id);
-      await updateDoc(tableRef, { joinedAt: now });
+    const localPendingCount = queue.filter(
+      request => request.tableId === req.tableId && request.status === 'pending'
+    ).length;
+    if (localPendingCount >= 3) {
+      throw new Error('QUEUE_LIMIT');
     }
 
-    // Robust ID generation
+    const now = Date.now();
+    const projectedRound = getProjectedRound(queue, req.tableId, now);
     const id = `req-${now}-${Math.random().toString(36).substr(2, 9)}`;
-    const newReq: SongRequest = {
-      ...req,
-      id,
-      status: 'pending',
-      createdAt: now,
-    };
-    console.log("Adding song request to Firestore:", newReq);
-    await setDoc(doc(db, 'songRequests', id), newReq);
+    const tableRef = doc(db, 'tables', req.tableId);
+    const settingsRef = doc(db, 'settings', 'system');
+    const requestRef = doc(db, 'songRequests', id);
+
+    await runTransaction(db, async transaction => {
+      const tableSnapshot = await transaction.get(tableRef);
+      const settingsSnapshot = await transaction.get(settingsRef);
+
+      if (!tableSnapshot.exists() || tableSnapshot.data().isActive !== true) {
+        throw new Error('TABLE_INACTIVE');
+      }
+      if (settingsSnapshot.exists() && settingsSnapshot.data().isSessionActive === false) {
+        throw new Error('SESSION_INACTIVE');
+      }
+
+      const pendingSongCount = Math.max(
+        tableSnapshot.data().pendingSongCount || 0,
+        localPendingCount
+      );
+      if (pendingSongCount >= 3) {
+        throw new Error('QUEUE_LIMIT');
+      }
+
+      transaction.update(tableRef, {
+        pendingSongCount: pendingSongCount + 1,
+        ...(!tableSnapshot.data().joinedAt ? { joinedAt: now } : {}),
+      });
+      transaction.set(requestRef, { ...req, id, status: 'pending', createdAt: now });
+    });
+
+    return projectedRound;
   };
 
   const markAsSung = async (songId: string) => {
-    const request = queue.find(s => s.id === songId);
-    if (!request) return;
-
-    const now = Date.now();
-    const table = tables.find(t => t.id === request.tableId);
-    if (table) {
-      const tableRef = doc(db, 'tables', table.id);
-      await updateDoc(tableRef, { 
-        songsSungCount: table.songsSungCount + 1,
-        lastSungAt: now 
-      });
+    if (fairQueue[0]?.id !== songId) {
+      throw new Error('OUT_OF_ORDER');
     }
 
+    const now = Date.now();
     const songRef = doc(db, 'songRequests', songId);
-    await updateDoc(songRef, { status: 'sung', completedAt: now });
+    await runTransaction(db, async transaction => {
+      const songSnapshot = await transaction.get(songRef);
+      if (!songSnapshot.exists() || songSnapshot.data().status !== 'pending') return;
+
+      const tableRef = doc(db, 'tables', songSnapshot.data().tableId);
+      const tableSnapshot = await transaction.get(tableRef);
+      if (!tableSnapshot.exists()) throw new Error('TABLE_NOT_FOUND');
+
+      transaction.update(tableRef, {
+        songsSungCount: (tableSnapshot.data().songsSungCount || 0) + 1,
+        pendingSongCount: Math.max(0, (tableSnapshot.data().pendingSongCount || 0) - 1),
+        lastSungAt: now,
+      });
+      transaction.update(songRef, { status: 'sung', completedAt: now });
+    });
   };
 
-  const removeSong = async (songId: string) => {
+  const markNoShow = async (songId: string) => {
+    if (fairQueue[0]?.id !== songId) {
+      throw new Error('OUT_OF_ORDER');
+    }
+
+    const now = Date.now();
     const songRef = doc(db, 'songRequests', songId);
-    await updateDoc(songRef, { status: 'removed' });
+    await runTransaction(db, async transaction => {
+      const songSnapshot = await transaction.get(songRef);
+      if (!songSnapshot.exists() || songSnapshot.data().status !== 'pending') return;
+
+      const tableRef = doc(db, 'tables', songSnapshot.data().tableId);
+      const tableSnapshot = await transaction.get(tableRef);
+      if (!tableSnapshot.exists()) throw new Error('TABLE_NOT_FOUND');
+
+      transaction.update(tableRef, {
+        songsSungCount: (tableSnapshot.data().songsSungCount || 0) + 1,
+        pendingSongCount: Math.max(0, (tableSnapshot.data().pendingSongCount || 0) - 1),
+      });
+      transaction.update(songRef, { status: 'no_show', completedAt: now });
+    });
   };
 
   const resetSystem = async () => {
@@ -196,6 +251,7 @@ export const KaraokeProvider = ({ children }: { children: ReactNode }) => {
       tablesSnap.docs.forEach((d) => {
         batch.update(d.ref, { 
           songsSungCount: 0,
+          pendingSongCount: 0,
           lastSungAt: deleteField(),
           joinedAt: deleteField()
         });
@@ -223,6 +279,7 @@ export const KaraokeProvider = ({ children }: { children: ReactNode }) => {
       name,
       isActive: true,
       songsSungCount: 0,
+      pendingSongCount: 0,
     };
     await setDoc(doc(db, 'tables', id), newTable);
   };
@@ -238,37 +295,16 @@ export const KaraokeProvider = ({ children }: { children: ReactNode }) => {
 
     try {
       console.log("Attempting login for:", cleanEmail);
-      await signInWithEmailAndPassword(auth, cleanEmail, cleanPass);
+      const credential = await signInWithEmailAndPassword(auth, cleanEmail, cleanPass);
+      const adminSnapshot = await getDoc(doc(db, 'admins', credential.user.uid));
+      if (!adminSnapshot.exists()) {
+        await signOut(auth);
+        return false;
+      }
       return true;
     } catch (error: any) {
       console.error("Login attempt failed. Code:", error.code, "Message:", error.message);
       
-      // Handle the new admin credentials provided by user
-      if (cleanEmail === 'sistemas@clubdelago.com.mx' && cleanPass === 'Clago12345*') {
-        try {
-          console.log("Admin credentials detected. Attempting auto-registration...");
-          const userCredential = await createUserWithEmailAndPassword(auth, cleanEmail, cleanPass);
-          
-          if (userCredential.user) {
-            console.log("Admin user created successfully.");
-            const adminRef = doc(db, 'admins', userCredential.user.uid);
-            await setDoc(adminRef, { 
-              email: cleanEmail, 
-              role: 'admin',
-              createdAt: Date.now()
-            });
-            return true;
-          }
-        } catch (regError: any) {
-          console.error("Auto-registration error:", regError.code, regError.message);
-          // If the user already exists (auth/email-already-in-use), but login failed above, 
-          // password must be wrong in Firebase Auth database compared to user input.
-          if (regError.code === 'auth/operation-not-allowed') {
-             // This is the critical part - telling the user via console/ui what to fix
-             throw new Error("ENABLE_EMAIL_AUTH");
-          }
-        }
-      }
       return false;
     }
   };
@@ -279,14 +315,11 @@ export const KaraokeProvider = ({ children }: { children: ReactNode }) => {
       const userCredential = await signInWithPopup(auth, provider);
       
       if (userCredential.user) {
-        // Automatically make them admin for easier access in this environment
-        console.log("Google Login success. Setting admin doc for UID:", userCredential.user.uid);
-        const adminRef = doc(db, 'admins', userCredential.user.uid);
-        await setDoc(adminRef, { 
-          email: userCredential.user.email, 
-          role: 'admin',
-          createdAt: Date.now()
-        }, { merge: true });
+        const adminSnapshot = await getDoc(doc(db, 'admins', userCredential.user.uid));
+        if (!adminSnapshot.exists()) {
+          await signOut(auth);
+          return { success: false, error: 'Esta cuenta no tiene permisos de administrador.' };
+        }
         return { success: true };
       }
       return { success: false, error: 'No se pudo obtener información del usuario.' };
@@ -302,9 +335,25 @@ export const KaraokeProvider = ({ children }: { children: ReactNode }) => {
 
   const fairQueue = getNextSongs(queue, tables);
 
+  const processedRequests = queue.filter(
+    request => (request.status === 'sung' || request.status === 'no_show' || request.status === 'removed')
+      && request.completedAt
+  );
+  const averageWaitMinutes = processedRequests.length === 0
+    ? 0
+    : Math.round(
+        processedRequests.reduce(
+          (total, request) => total + ((request.completedAt || request.createdAt) - request.createdAt),
+          0
+        ) / processedRequests.length / 60000
+      );
+
   const stats = {
     pending: queue.filter(r => r.status === 'pending').length,
     completed: queue.filter(r => r.status === 'sung').length,
+    noShows: queue.filter(r => r.status === 'no_show').length,
+    turnsConsumed: queue.filter(r => r.status === 'sung' || r.status === 'no_show' || r.status === 'removed').length,
+    averageWaitMinutes,
     activeTables: tables.filter(t => t.isActive).length,
   };
 
@@ -314,12 +363,12 @@ export const KaraokeProvider = ({ children }: { children: ReactNode }) => {
       queue,
       addSongRequest,
       markAsSung,
-      removeSong,
+      markNoShow,
       toggleTableStatus,
       addTable,
       fairQueue,
       stats,
-      isAuthenticated: !!user,
+      isAuthenticated: !!user && isAdminUser,
       user,
       login,
       logout,

@@ -1,89 +1,193 @@
 import { SongRequest, Table } from '../types';
 
+interface Assignment {
+  round: number;
+  order: number;
+  tableOrder: number;
+}
+
+interface QueueEvent {
+  at: number;
+  type: 'create' | 'complete';
+  request: SongRequest;
+}
+
+interface RoundStart {
+  at: number;
+  previousTableId?: string;
+}
+
+interface QueuePlan {
+  assignments: Map<string, Assignment>;
+  roundStarts: Map<number, RoundStart>;
+}
+
 /**
- * Algoritmo de Cola Justa (Respeto al Turno):
- * 1. Cada mesa canta una vez por ciclo/ronda antes de poder cantar su siguiente canción.
- * 2. Su primera canción pendiente (índice 0) se agenda de acuerdo a su historial real de canciones cantadas (songsSungCount + 1).
- *    Esto garantiza que si una mesa tiene 1 canción cantada y otra tiene 15, la mesa rezagada canta de inmediato.
- * 3. Las canciones subsiguientes (índices 1, 2, etc.) de una misma mesa se postergan para rondas futuras asignadas a:
- *    Math.max(su turno actual, la ronda mínima activa de las otras mesas en cola) + índice.
- * 4. Esto previene de forma matemática absoluta que cualquier mesa cante de forma consecutiva (con canciones seguidas)
- *    siempre y cuando haya otras mesas esperando en cola, respetando con total exactitud la prioridad y la antigüedad de llegada.
+ * Reconstructs stable karaoke rounds from the immutable request history.
+ *
+ * Rules:
+ * - A table can have only one song in each round.
+ * - A new table joins the end of the round that is active when it requests.
+ * - Extra songs from the same table go to consecutive future rounds.
+ * - Completed-song totals never give a late table permission to jump the line.
+ * - A table cannot close one round and open the next while another table waits.
+ * - Once a round starts, late arrivals are appended without moving its next table.
  */
-export function getNextSongs(queue: SongRequest[], tables: Table[]): SongRequest[] {
-  const pendingRequests = [...queue].filter(r => r.status === 'pending');
-  
-  if (pendingRequests.length === 0) return [];
+function buildAssignments(queue: SongRequest[]): QueuePlan {
+  const events: QueueEvent[] = [];
 
-  // Agrupamos las canciones pendientes por mesa para identificar qué número de pedido es para cada mesa (0, 1, 2...)
-  const tableRequestsMap: Record<string, SongRequest[]> = {};
-  pendingRequests.forEach(req => {
-    if (!tableRequestsMap[req.tableId]) {
-      tableRequestsMap[req.tableId] = [];
-    }
-    tableRequestsMap[req.tableId].push(req);
-  });
+  queue.forEach(request => {
+    events.push({ at: request.createdAt, type: 'create', request });
 
-  // Ordenamos las listas de cada mesa internamente por fecha de creación (FIFO por mesa)
-  Object.values(tableRequestsMap).forEach(list => {
-    list.sort((a, b) => a.createdAt - b.createdAt);
-  });
-
-  // Identificamos las mesas activas en la cola que tienen solicitudes pendientes
-  const activeTablesInQueue = tables.filter(t => tableRequestsMap[t.id] && tableRequestsMap[t.id].length > 0);
-
-  // La ronda base global del evento es el número máximo de canciones cantadas por cualquier mesa + 1.
-  // Esto mantiene un valor de ronda estable y libre de fluctuaciones bruscas cuando las mesas entran o salen de la cola.
-  const baseRound = tables.length > 0
-    ? Math.max(...tables.map(t => t.songsSungCount || 0)) + 1
-    : 1;
-
-  // Calculamos la cantidad máxima de canciones que tiene alguna mesa individual
-  const maxSongsForAnyTable = Math.max(...Object.values(tableRequestsMap).map(list => list.length));
-
-  const sortedRequests: SongRequest[] = [];
-
-  // Distribuimos las canciones en "Rondas Virtuales"
-  // Cada iteración representa una ronda del evento (Ronda 1, Ronda 2, Ronda 3...)
-  for (let r = 0; r < maxSongsForAnyTable; r++) {
-    const roundSongs: SongRequest[] = [];
-
-    // Recolectamos la r-ésima canción de cada mesa que tenga suficientes canciones pendientes
-    activeTablesInQueue.forEach(table => {
-      const tableSongs = tableRequestsMap[table.id];
-      if (tableSongs && tableSongs.length > r) {
-        roundSongs.push(tableSongs[r]);
-      }
-    });
-
-    // Ordenamos las canciones dentro de esta ronda:
-    // 1. Por historial real de canciones cantadas (los que han cantado menos van primero).
-    // 2. Por el tiempo de creación del PRIMER tema pendiente de cada mesa (antigüedad de espera de la mesa en el local).
-    roundSongs.sort((songA, songB) => {
-      const tableA = tables.find(t => t.id === songA.tableId);
-      const tableB = tables.find(t => t.id === songB.tableId);
-
-      const sungA = tableA?.songsSungCount || 0;
-      const sungB = tableB?.songsSungCount || 0;
-
-      if (sungA !== sungB) {
-        return sungA - sungB;
-      }
-
-      // Desempate: antigüedad del primer tema de la mesa en la cola
-      const firstSongA = tableRequestsMap[songA.tableId][0];
-      const firstSongB = tableRequestsMap[songB.tableId][0];
-      return firstSongA.createdAt - firstSongB.createdAt;
-    });
-
-    // Asignamos la ronda lógica exacta y añadimos a la lista final
-    roundSongs.forEach(song => {
-      sortedRequests.push({
-        ...song,
-        logicalRound: baseRound + r
+    if (request.status === 'sung' || request.status === 'no_show' || request.status === 'removed') {
+      events.push({
+        at: request.completedAt ?? request.createdAt,
+        type: 'complete',
+        request,
       });
-    });
-  }
+    }
+  });
 
-  return sortedRequests;
+  events.sort((a, b) =>
+    a.at - b.at
+    || (a.type === b.type ? 0 : a.type === 'create' ? -1 : 1)
+    || a.request.id.localeCompare(b.request.id)
+  );
+
+  const assignments = new Map<string, Assignment>();
+  const lastRoundByTable = new Map<string, number>();
+  const tableOrder = new Map<string, number>();
+  const pendingByRound = new Map<number, number>();
+  const roundStarts = new Map<number, RoundStart>([[1, { at: 0 }]]);
+  let currentRound = 1;
+  let nextOrder = 1;
+  let nextTableOrder = 1;
+
+  events.forEach(event => {
+    if (event.type === 'create') {
+      const tableNextRound = (lastRoundByTable.get(event.request.tableId) ?? 0) + 1;
+      const round = Math.max(currentRound, tableNextRound);
+      if (!tableOrder.has(event.request.tableId)) {
+        tableOrder.set(event.request.tableId, nextTableOrder++);
+      }
+
+      assignments.set(event.request.id, {
+        round,
+        order: nextOrder++,
+        tableOrder: tableOrder.get(event.request.tableId)!,
+      });
+      lastRoundByTable.set(event.request.tableId, round);
+      pendingByRound.set(round, (pendingByRound.get(round) ?? 0) + 1);
+      return;
+    }
+
+    const assignment = assignments.get(event.request.id);
+    if (!assignment) return;
+
+    pendingByRound.set(
+      assignment.round,
+      Math.max(0, (pendingByRound.get(assignment.round) ?? 0) - 1)
+    );
+
+    if (assignment.round !== currentRound || (pendingByRound.get(currentRound) ?? 0) > 0) {
+      return;
+    }
+
+    const nextActiveRound = [...pendingByRound.entries()]
+      .filter(([round, pending]) => round > currentRound && pending > 0)
+      .map(([round]) => round)
+      .sort((a, b) => a - b)[0];
+
+    currentRound = nextActiveRound ?? currentRound + 1;
+    roundStarts.set(currentRound, {
+      at: event.at,
+      previousTableId: event.request.tableId,
+    });
+  });
+
+  return { assignments, roundStarts };
+}
+
+export function getNextSongs(queue: SongRequest[], _tables: Table[]): SongRequest[] {
+  const { assignments, roundStarts } = buildAssignments(queue);
+  const pendingSongs = queue
+    .filter(request => request.status === 'pending')
+    .map(request => ({
+      ...request,
+      logicalRound: assignments.get(request.id)?.round ?? 1,
+    }))
+    .sort((a, b) => {
+      const assignmentA = assignments.get(a.id);
+      const assignmentB = assignments.get(b.id);
+
+      return (assignmentA?.round ?? 1) - (assignmentB?.round ?? 1)
+        || (assignmentA?.tableOrder ?? 0) - (assignmentB?.tableOrder ?? 0)
+        || (assignmentA?.order ?? 0) - (assignmentB?.order ?? 0)
+        || a.id.localeCompare(b.id);
+    });
+
+  const rounds = new Map<number, SongRequest[]>();
+  pendingSongs.forEach(song => {
+    const round = song.logicalRound ?? 1;
+    rounds.set(round, [...(rounds.get(round) ?? []), song]);
+  });
+
+  const orderedSongs: SongRequest[] = [];
+  let previousTableId: string | undefined;
+  [...rounds.keys()].sort((a, b) => a - b).forEach(round => {
+    let roundSongs = rounds.get(round) ?? [];
+    const roundStart = roundStarts.get(round);
+
+    if (roundStart) {
+      previousTableId = roundStart.previousTableId;
+      const waitingAtStart = roundSongs.filter(song => song.createdAt <= roundStart.at);
+      const lateArrivals = roundSongs
+        .filter(song => song.createdAt > roundStart.at)
+        .sort((a, b) =>
+          (assignments.get(a.id)?.order ?? 0) - (assignments.get(b.id)?.order ?? 0)
+        );
+
+      roundSongs = [...waitingAtStart, ...lateArrivals];
+    }
+
+    const waitingCount = roundStart
+      ? roundSongs.filter(song => song.createdAt <= roundStart.at).length
+      : roundSongs.length;
+
+    if (waitingCount > 1 && roundSongs[0].tableId === previousTableId) {
+      const nextTableIndex = roundSongs
+        .slice(0, waitingCount)
+        .findIndex(song => song.tableId !== previousTableId);
+      const waitingSongs = roundSongs.slice(0, waitingCount);
+      roundSongs = [
+        ...waitingSongs.slice(nextTableIndex),
+        ...waitingSongs.slice(0, nextTableIndex),
+        ...roundSongs.slice(waitingCount),
+      ];
+    }
+
+    orderedSongs.push(...roundSongs);
+    previousTableId = roundSongs.at(-1)?.tableId ?? previousTableId;
+  });
+
+  return orderedSongs;
+}
+
+export function getProjectedRound(
+  queue: SongRequest[],
+  tableId: string,
+  createdAt = Date.now()
+): number {
+  const projectionId = `projection-${createdAt}-${tableId}`;
+  const projectedRequest: SongRequest = {
+    id: projectionId,
+    tableId,
+    singerName: '',
+    songTitle: '',
+    artistName: '',
+    status: 'pending',
+    createdAt,
+  };
+
+  return buildAssignments([...queue, projectedRequest]).assignments.get(projectionId)?.round ?? 1;
 }
