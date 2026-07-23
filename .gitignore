@@ -1,4 +1,9 @@
 node_modules/
+.npm-cache/
+.pnpm-store/
+.firebase/
+pnpm-lock.yaml
+pnpm-workspace.yaml
 build/
 dist/
 coverage/

@@ -22,7 +22,7 @@
         "singerName": { "type": "string" },
         "songTitle": { "type": "string" },
         "artistName": { "type": "string" },
-        "status": { "type": "string", "enum": ["pending", "singing", "sung", "removed"] },
+        "status": { "type": "string", "enum": ["pending", "singing", "sung", "no_show", "removed"] },
         "createdAt": { "type": "integer" },
         "completedAt": { "type": "integer" }
       },
