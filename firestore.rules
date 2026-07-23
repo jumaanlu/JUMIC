@@ -1,108 +1,99 @@
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
-    
-    // -------------------------------------------------------------------------
-    // GLOBAL HELPERS
-    // -------------------------------------------------------------------------
-    
     function isSignedIn() {
       return request.auth != null;
     }
-    
+
     function isAdmin() {
-      // For this demo, we can trust a UID if it exists in admins or simply isSignedIn
-      // To follow the "get" requirement strictly:
-      return isSignedIn() && exists(/databases/$(database)/documents/admins/$(request.auth.uid));
-    }
-    
-    function isValidId(id) {
-      return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
-    }
-    
-    function incoming() {
-      return request.resource.data;
-    }
-    
-    function existing() {
-      return resource.data;
+      return isSignedIn()
+        && exists(/databases/$(database)/documents/admins/$(request.auth.uid));
     }
 
-    // -------------------------------------------------------------------------
-    // DEFAULT DENY
-    // -------------------------------------------------------------------------
-    match /{document=**} {
-      allow read, write: if false;
+    function validId(id) {
+      return id is string
+        && id.size() <= 128
+        && id.matches('^[a-zA-Z0-9_\\-]+$');
     }
 
-    // -------------------------------------------------------------------------
-    // TABLES COLLECTION
-    // -------------------------------------------------------------------------
     match /tables/{tableId} {
-      allow get: if isValidId(tableId);
+      allow get: if validId(tableId);
       allow list: if true;
-      
-      // Update by Guest: Only allowed to set 'joinedAt' if it's currently null
-      // Update by DJ: Allowed all valid table updates
-      allow update: if (
-        (isSignedIn() && isValidTable(incoming())) ||
-        (!isSignedIn() && isValidTable(incoming()) && (incoming().diff(existing()).affectedKeys().hasOnly(['joinedAt'])))
-      );
-      
-      // DJ operations
-      allow create: if isSignedIn() && isValidTable(incoming());
-      allow delete: if isSignedIn();
-      
-      function isValidTable(data) {
-        return data.keys().hasAll(['id', 'name', 'isActive', 'songsSungCount']) 
-          && data.keys().size() >= 4 && data.keys().size() <= 6
-          && data.id is string && data.id.size() <= 64
+      allow create: if isAdmin() && validTable(request.resource.data);
+      allow update: if (isAdmin() && validTable(request.resource.data)) || isGuestQueueUpdate();
+      allow delete: if isAdmin();
+
+      function validTable(data) {
+        return data.keys().hasAll(['id', 'name', 'isActive', 'songsSungCount'])
+          && data.keys().hasOnly(['id', 'name', 'isActive', 'songsSungCount', 'pendingSongCount', 'lastSungAt', 'joinedAt'])
+          && data.id == tableId
           && data.name is string && data.name.size() <= 100
           && data.isActive is bool
-          && (data.songsSungCount is int || data.songsSungCount is float)
+          && data.songsSungCount is int && data.songsSungCount >= 0
+          && (data.get('pendingSongCount', null) == null
+            || (data.pendingSongCount is int && data.pendingSongCount >= 0 && data.pendingSongCount <= 3))
           && (data.get('lastSungAt', null) == null || data.lastSungAt is int)
           && (data.get('joinedAt', null) == null || data.joinedAt is int);
       }
+
+      function isGuestQueueUpdate() {
+        return !isSignedIn()
+          && validTable(request.resource.data)
+          && resource.data.isActive == true
+          && request.resource.data.pendingSongCount > resource.data.get('pendingSongCount', 0)
+          && request.resource.data.pendingSongCount <= 3
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['pendingSongCount', 'joinedAt'])
+          && (
+            request.resource.data.get('joinedAt', null) == resource.data.get('joinedAt', null)
+            || (resource.data.get('joinedAt', null) == null && request.resource.data.joinedAt is int)
+          );
+      }
     }
 
-    // -------------------------------------------------------------------------
-    // SONG REQUESTS COLLECTION
-    // -------------------------------------------------------------------------
     match /songRequests/{requestId} {
-      allow get: if isValidId(requestId) && (isSignedIn() || (resource != null && resource.data.status == 'pending'));
-      allow list: if true; // Public view might need to see the queue too? 
-      // Actually, the current public view doesn't show the queue, but it's safe to list pending ones.
-      
-      allow create: if isValidSongRequest(incoming());
-      
-      allow update: if isSignedIn() && isValidSongRequest(incoming());
-      allow delete: if isSignedIn(); // Allow DJ to delete for reset
+      allow get: if validId(requestId);
+      allow list: if true;
+      allow create: if validRequest(request.resource.data)
+        && request.resource.data.id == requestId
+        && request.resource.data.status == 'pending'
+        && !request.resource.data.keys().hasAny(['completedAt', 'logicalRound'])
+        && get(/databases/$(database)/documents/tables/$(request.resource.data.tableId)).data.isActive == true
+        && getAfter(/databases/$(database)/documents/tables/$(request.resource.data.tableId)).data.pendingSongCount
+          > get(/databases/$(database)/documents/tables/$(request.resource.data.tableId)).data.get('pendingSongCount', 0)
+        && getAfter(/databases/$(database)/documents/tables/$(request.resource.data.tableId)).data.pendingSongCount <= 3
+        && (!exists(/databases/$(database)/documents/settings/system)
+          || get(/databases/$(database)/documents/settings/system).data.isSessionActive == true);
+      allow update: if isAdmin()
+        && validRequest(request.resource.data)
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'completedAt']);
+      allow delete: if isAdmin();
 
-      function isValidSongRequest(data) {
+      function validRequest(data) {
         return data.keys().hasAll(['id', 'tableId', 'singerName', 'songTitle', 'artistName', 'status', 'createdAt'])
-          && data.keys().size() >= 7 && data.keys().size() <= 9
-          && data.id is string && data.id.size() <= 64
-          && data.tableId is string && data.tableId.size() <= 64
-          && data.singerName is string && data.singerName.size() <= 100
-          && data.songTitle is string && data.songTitle.size() <= 200
-          && data.artistName is string && data.artistName.size() <= 200
-          && data.status in ['pending', 'singing', 'sung', 'removed']
-          && (data.createdAt is int || data.createdAt is float)
+          && data.keys().hasOnly(['id', 'tableId', 'singerName', 'songTitle', 'artistName', 'status', 'createdAt', 'completedAt'])
+          && validId(data.id)
+          && validId(data.tableId)
+          && data.singerName is string && data.singerName.size() > 0 && data.singerName.size() <= 100
+          && data.songTitle is string && data.songTitle.size() > 0 && data.songTitle.size() <= 200
+          && data.artistName is string && data.artistName.size() > 0 && data.artistName.size() <= 200
+          && data.status in ['pending', 'singing', 'sung', 'no_show', 'removed']
+          && data.createdAt is int && data.createdAt > 0
           && (data.get('completedAt', null) == null || data.completedAt is int);
       }
     }
 
-    // -------------------------------------------------------------------------
-    // ADMINS COLLECTION
-    // -------------------------------------------------------------------------
     match /admins/{uid} {
       allow read: if isSignedIn() && request.auth.uid == uid;
-      allow create: if isSignedIn() && request.auth.uid == uid;
+      allow write: if false;
     }
 
     match /settings/{docId} {
       allow read: if true;
       allow write: if isAdmin();
+    }
+
+    match /{document=**} {
+      allow read, write: if false;
     }
   }
 }
