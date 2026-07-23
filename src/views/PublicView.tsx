@@ -17,6 +17,7 @@ export const PublicView = () => {
         fairQueue.filter(request => request.tableId === currentTable.id).length
       )
     : 0;
+  const isQueueLimitReached = pendingSongCount >= 3;
   
   const [singerName, setSingerName] = useState('');
   const [songTitle, setSongTitle] = useState('');
@@ -84,6 +85,10 @@ export const PublicView = () => {
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (isQueueLimitReached) {
+      setError('Tu mesa ya tiene 3 canciones pendientes. Espera a que una sea completada o marcada como NO SHOW.');
+      return;
+    }
     if (!singerName || !songTitle || !artistName) return;
 
     setError(null);
@@ -134,7 +139,7 @@ export const PublicView = () => {
         </header>
 
         <AnimatePresence>
-          {pendingSongCount >= 3 && (
+          {isQueueLimitReached && (
             <motion.div
               role="alert"
               aria-live="assertive"
@@ -173,7 +178,7 @@ export const PublicView = () => {
                 <p className="text-[9px] text-app-accent font-black uppercase tracking-widest pt-2">{pendingSongCount} de 3 canciones pendientes</p>
               </div>
               
-              <form onSubmit={handleSubmit} className="space-y-6">
+              <form onSubmit={handleSubmit} className="space-y-6" aria-disabled={isQueueLimitReached}>
                 <div className="space-y-2">
                   <label className="block text-[10px] font-bold text-app-text-s uppercase tracking-widest ml-1 opacity-70">¿Quién va a cantar?</label>
                   <div className="relative group">
@@ -181,10 +186,11 @@ export const PublicView = () => {
                     <input
                       type="text"
                       required
+                      disabled={isQueueLimitReached}
                       value={singerName}
                       onChange={e => setSingerName(e.target.value)}
                       placeholder="Nombre del intérprete"
-                      className="w-full bg-app-bg/50 pl-11 pr-4 py-4 rounded-2xl border border-app-line focus:border-app-accent focus:ring-1 focus:ring-app-accent/20 outline-none transition-all placeholder:text-app-text-s/30 font-bold text-sm"
+                      className="w-full bg-app-bg/50 pl-11 pr-4 py-4 rounded-2xl border border-app-line focus:border-app-accent focus:ring-1 focus:ring-app-accent/20 outline-none transition-all placeholder:text-app-text-s/30 font-bold text-sm disabled:cursor-not-allowed disabled:opacity-40 disabled:border-red-500/30"
                     />
                   </div>
                 </div>
@@ -196,10 +202,11 @@ export const PublicView = () => {
                     <input
                       type="text"
                       required
+                      disabled={isQueueLimitReached}
                       value={songTitle}
                       onChange={e => setSongTitle(e.target.value)}
                       placeholder="Título de la canción"
-                      className="w-full bg-app-bg/50 pl-11 pr-4 py-4 rounded-2xl border border-app-line focus:border-app-accent focus:ring-1 focus:ring-app-accent/20 outline-none transition-all placeholder:text-app-text-s/30 font-bold text-sm"
+                      className="w-full bg-app-bg/50 pl-11 pr-4 py-4 rounded-2xl border border-app-line focus:border-app-accent focus:ring-1 focus:ring-app-accent/20 outline-none transition-all placeholder:text-app-text-s/30 font-bold text-sm disabled:cursor-not-allowed disabled:opacity-40 disabled:border-red-500/30"
                     />
                   </div>
                 </div>
@@ -211,10 +218,11 @@ export const PublicView = () => {
                     <input
                       type="text"
                       required
+                      disabled={isQueueLimitReached}
                       value={artistName}
                       onChange={e => setArtistName(e.target.value)}
                       placeholder="Nombre del artista"
-                      className="w-full bg-app-bg/50 pl-11 pr-4 py-4 rounded-2xl border border-app-line focus:border-app-accent focus:ring-1 focus:ring-app-accent/20 outline-none transition-all placeholder:text-app-text-s/30 font-bold text-sm"
+                      className="w-full bg-app-bg/50 pl-11 pr-4 py-4 rounded-2xl border border-app-line focus:border-app-accent focus:ring-1 focus:ring-app-accent/20 outline-none transition-all placeholder:text-app-text-s/30 font-bold text-sm disabled:cursor-not-allowed disabled:opacity-40 disabled:border-red-500/30"
                     />
                   </div>
                 </div>
@@ -228,10 +236,10 @@ export const PublicView = () => {
                 <div className="pt-4">
                   <Button 
                     type="submit" 
-                    disabled={isSubmitting || pendingSongCount >= 3}
+                    disabled={isSubmitting || isQueueLimitReached}
                     className="w-full h-14 rounded-2xl text-[11px] font-black uppercase tracking-[0.2em] gap-3"
                   >
-                    {pendingSongCount >= 3 ? (
+                    {isQueueLimitReached ? (
                         <>Límite de canciones alcanzado</>
                     ) : isSubmitting ? (
                         <>Iniciando Transmisión...</>
