@@ -345,7 +345,7 @@ export const PublicView = () => {
                       <div className="text-app-accent font-black text-lg select-none">•</div>
                       <div>
                         <h4 className="text-[11px] font-black uppercase tracking-widest mb-1">Si llegas tarde</h4>
-                        <p className="text-[10px] text-app-text-s font-semibold uppercase tracking-widest leading-relaxed opacity-70">Tu primera canción entra al final de la ronda actual. Las siguientes pasan a las rondas posteriores, igual que las demás mesas.</p>
+                        <p className="text-[10px] text-app-text-s font-semibold uppercase tracking-widest leading-relaxed opacity-70">Tu primera canción entra al final de la ronda actual cuando quedan al menos 3 turnos. Si la ronda está por terminar, entra al final de la siguiente para evitar ventajas.</p>
                       </div>
                     </div>
 
