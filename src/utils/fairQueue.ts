@@ -23,11 +23,20 @@ interface QueuePlan {
 }
 
 /**
+ * A newly arriving table should have at least this many already-scheduled
+ * performances ahead of its first song. At 3.5 minutes per turn, this creates
+ * a minimum visible wait of roughly 10.5 minutes and avoids an apparent jump
+ * when the current round is about to end.
+ */
+const NEW_TABLE_MIN_TURNS_AHEAD = 3;
+
+/**
  * Reconstructs stable karaoke rounds from the immutable request history.
  *
  * Rules:
  * - A table can have only one song in each round.
- * - A new table joins the end of the round that is active when it requests.
+ * - A new table joins the active round only when at least three existing turns
+ *   remain; otherwise its first song goes to the end of the next round.
  * - Extra songs from the same table go to consecutive future rounds.
  * - Completed-song totals never give a late table permission to jump the line.
  * - A table cannot close one round and open the next while another table waits.
@@ -60,13 +69,22 @@ function buildAssignments(queue: SongRequest[]): QueuePlan {
   const pendingByRound = new Map<number, number>();
   const roundStarts = new Map<number, RoundStart>([[1, { at: 0 }]]);
   let currentRound = 1;
+  let firstRoundHasStarted = false;
   let nextOrder = 1;
   let nextTableOrder = 1;
 
   events.forEach(event => {
     if (event.type === 'create') {
+      const isNewTable = !lastRoundByTable.has(event.request.tableId);
       const tableNextRound = (lastRoundByTable.get(event.request.tableId) ?? 0) + 1;
-      const round = Math.max(currentRound, tableNextRound);
+      const currentRoundHasStarted = currentRound > 1 || firstRoundHasStarted;
+      const remainingCurrentRoundTurns = pendingByRound.get(currentRound) ?? 0;
+      const newTableRound = isNewTable
+        && currentRoundHasStarted
+        && remainingCurrentRoundTurns < NEW_TABLE_MIN_TURNS_AHEAD
+        ? currentRound + 1
+        : currentRound;
+      const round = Math.max(newTableRound, tableNextRound);
       if (!tableOrder.has(event.request.tableId)) {
         tableOrder.set(event.request.tableId, nextTableOrder++);
       }
@@ -83,6 +101,7 @@ function buildAssignments(queue: SongRequest[]): QueuePlan {
 
     const assignment = assignments.get(event.request.id);
     if (!assignment) return;
+    if (assignment.round === 1) firstRoundHasStarted = true;
 
     pendingByRound.set(
       assignment.round,
