@@ -27,11 +27,16 @@ async function worker() {
         signal: AbortSignal.timeout(15_000),
       });
       const body = await response.text();
+      const cacheControl = response.headers.get('cache-control') || '';
       const elapsedMs = performance.now() - startedAt;
       latencies.push(elapsedMs);
 
-      if (!response.ok || !body.includes('<div id="root"></div>')) {
-        failures.push({ route, status: response.status, reason: 'unexpected response' });
+      if (!response.ok || !body.includes('<div id="root"></div>') || !cacheControl.includes('no-store')) {
+        failures.push({
+          route,
+          status: response.status,
+          reason: !cacheControl.includes('no-store') ? 'HTML can be cached across deployments' : 'unexpected response',
+        });
       }
     } catch (error) {
       failures.push({ route, reason: error instanceof Error ? error.message : String(error) });
