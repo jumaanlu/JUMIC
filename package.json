@@ -10,7 +10,8 @@
     "start": "node server.js",
     "preview": "vite preview",
     "clean": "rm -rf dist",
-    "lint": "tsc --noEmit"
+    "lint": "tsc --noEmit",
+    "test:fair-queue": "tsx --test src/utils/fairQueue.test.ts"
   },
   "dependencies": {
     "@google/genai": "^1.29.0",
