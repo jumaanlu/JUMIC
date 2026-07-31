@@ -36,6 +36,10 @@ export const DJDashboard = () => {
   const [showToast, setShowToast] = React.useState(false);
   const [isSyncing, setIsSyncing] = React.useState(false);
   const [isResetting, setIsResetting] = React.useState(false);
+  const [processingSongId, setProcessingSongId] = React.useState<string | null>(null);
+  const [actionError, setActionError] = React.useState<string | null>(null);
+  const [isAddingSong, setIsAddingSong] = React.useState(false);
+  const [manualAddError, setManualAddError] = React.useState<string | null>(null);
 
   const formatDate = (timestamp?: number) => timestamp
     ? new Date(timestamp).toLocaleDateString('es-MX')
@@ -141,10 +145,49 @@ export const DJDashboard = () => {
   const handleManualAdd = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!newReq.singerName || !newReq.songTitle || !newReq.artistName) return;
-    
-    await addSongRequest(newReq);
-    setShowAddModal(false);
-    setNewReq({ tableId: 'mesa-1', singerName: '', songTitle: '', artistName: '' });
+
+    setIsAddingSong(true);
+    setManualAddError(null);
+    try {
+      await addSongRequest(newReq);
+      setShowAddModal(false);
+      setNewReq({ tableId: 'mesa-1', singerName: '', songTitle: '', artistName: '' });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : '';
+      setManualAddError(
+        message === 'QUEUE_LIMIT'
+          ? 'La mesa ya tiene 3 canciones pendientes.'
+          : message === 'TABLE_INACTIVE'
+            ? 'La mesa está bloqueada y no puede registrar canciones.'
+            : message === 'SESSION_INACTIVE'
+              ? 'El registro de canciones está pausado.'
+              : 'No se pudo registrar la canción. Revisa la conexión e inténtalo nuevamente.'
+      );
+    } finally {
+      setIsAddingSong(false);
+    }
+  };
+
+  const handleSongAction = async (songId: string, action: 'complete' | 'no-show') => {
+    if (processingSongId) return;
+
+    setProcessingSongId(songId);
+    setActionError(null);
+    try {
+      if (action === 'complete') {
+        await markAsSung(songId);
+      } else {
+        await markNoShow(songId);
+      }
+    } catch (error) {
+      setActionError(
+        error instanceof Error && error.message === 'OUT_OF_ORDER'
+          ? 'La cola cambió en otro dispositivo. Espera un momento y vuelve a intentarlo con la primera canción.'
+          : 'No se pudo actualizar el turno. Verifica la conexión y vuelve a intentarlo; el turno no se perdió.'
+      );
+    } finally {
+      setProcessingSongId(null);
+    }
   };
 
   const handleReset = async () => {
@@ -154,6 +197,7 @@ export const DJDashboard = () => {
       setShowResetModal(false);
     } catch (err) {
       console.error(err);
+      setActionError('No se pudo reiniciar el sistema. No se borró el estado completo; revisa la conexión antes de intentarlo otra vez.');
     } finally {
       setIsResetting(false);
     }
@@ -255,7 +299,10 @@ export const DJDashboard = () => {
                     <RefreshCw className={cn("w-4 h-4", isSyncing && "animate-spin text-app-accent")} />
                 </Button>
                 <Button 
-                    onClick={() => setShowAddModal(true)}
+                    onClick={() => {
+                      setManualAddError(null);
+                      setShowAddModal(true);
+                    }}
                     variant="primary"
                     size="md" 
                     className="gap-3 flex-1 sm:flex-none uppercase tracking-widest text-[10px] h-12 rounded-2xl"
@@ -265,6 +312,12 @@ export const DJDashboard = () => {
                 </Button>
               </div>
             </div>
+
+            {actionError && (
+              <div role="alert" className="mx-6 mt-5 rounded-2xl border border-red-500/30 bg-red-500/10 px-5 py-4 text-xs font-bold text-red-300">
+                {actionError}
+              </div>
+            )}
 
             <div className="overflow-y-auto max-h-[700px] divide-y divide-app-line/30">
               <AnimatePresence mode="popLayout">
@@ -326,7 +379,8 @@ export const DJDashboard = () => {
                               <div className="flex items-center gap-2">
                                 {isNext && (
                                   <Button
-                                    onClick={() => markAsSung(song.id)}
+                                    onClick={() => handleSongAction(song.id, 'complete')}
+                                    disabled={processingSongId !== null}
                                     variant="primary"
                                     size="md"
                                     className="px-6"
@@ -342,9 +396,10 @@ export const DJDashboard = () => {
                                   <Button
                                     size="sm"
                                     variant="secondary"
+                                    disabled={processingSongId !== null}
                                     onClick={() => {
                                       if (window.confirm(`¿Marcar a ${song.singerName} como NO SHOW? Contará como turno consumido y liberará un espacio para la mesa.`)) {
-                                        markNoShow(song.id);
+                                        void handleSongAction(song.id, 'no-show');
                                       }
                                     }}
                                     className="h-8 px-2.5 rounded-lg bg-red-500/10 text-red-400 border border-red-500/20 hover:bg-red-500 hover:text-white transition-colors"
@@ -610,7 +665,7 @@ export const DJDashboard = () => {
               initial={{ opacity: 0 }}
               animate={{ opacity: 1 }}
               exit={{ opacity: 0 }}
-              onClick={() => setShowAddModal(false)}
+              onClick={() => !isAddingSong && setShowAddModal(false)}
               className="absolute inset-0 bg-black/60 backdrop-blur-sm" 
             />
             <motion.div 
@@ -625,12 +680,17 @@ export const DJDashboard = () => {
                     <h3 className="text-xl font-bold uppercase tracking-tight">Registro Manual</h3>
                     <p className="text-[10px] text-app-text-s font-bold uppercase tracking-widest mt-1 opacity-60">Añadir canción desde el panel</p>
                   </div>
-                  <Button size="icon" variant="ghost" onClick={() => setShowAddModal(false)} className="h-8 w-8 -mr-2">
+                  <Button size="icon" variant="ghost" disabled={isAddingSong} onClick={() => setShowAddModal(false)} className="h-8 w-8 -mr-2">
                     <X className="w-4 h-4" />
                   </Button>
                 </div>
 
                 <form onSubmit={handleManualAdd} className="space-y-5">
+                  {manualAddError && (
+                    <div role="alert" className="rounded-xl border border-red-500/30 bg-red-500/10 px-4 py-3 text-xs font-bold text-red-300">
+                      {manualAddError}
+                    </div>
+                  )}
                   <div className="space-y-2">
                     <label className="text-[10px] font-bold text-app-text-s uppercase tracking-widest ml-1">Mesa</label>
                     <select 
@@ -682,6 +742,7 @@ export const DJDashboard = () => {
                     <Button 
                         type="button" 
                         variant="ghost" 
+                        disabled={isAddingSong}
                         onClick={() => setShowAddModal(false)}
                         className="flex-1 h-12 text-[10px] font-bold uppercase tracking-widest"
                     >
@@ -689,9 +750,10 @@ export const DJDashboard = () => {
                     </Button>
                     <Button 
                         type="submit" 
+                        disabled={isAddingSong}
                         className="flex-1 h-12 text-[10px] font-bold uppercase tracking-widest"
                     >
-                        AGREGAR
+                        {isAddingSong ? 'REGISTRANDO...' : 'AGREGAR'}
                     </Button>
                   </div>
                 </form>

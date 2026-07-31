@@ -1,6 +1,7 @@
 import React, { createContext, useContext, useState, useEffect, ReactNode } from 'react';
 import { Table, SongRequest, KaraokeState } from '../types';
 import { getNextSongs, getProjectedRound } from '../utils/fairQueue';
+import { chunkItems } from '../utils/chunkItems';
 import { db, auth } from '../lib/firebase';
 import { 
   collection, 
@@ -25,10 +26,10 @@ import {
 
 interface KaraokeContextType extends KaraokeState {
   addSongRequest: (request: Omit<SongRequest, 'id' | 'status' | 'createdAt'>) => Promise<number>;
-  markAsSung: (songId: string) => void;
-  markNoShow: (songId: string) => void;
-  toggleTableStatus: (tableId: string) => void;
-  addTable: (name: string) => void;
+  markAsSung: (songId: string) => Promise<void>;
+  markNoShow: (songId: string) => Promise<void>;
+  toggleTableStatus: (tableId: string) => Promise<void>;
+  addTable: (name: string) => Promise<void>;
   fairQueue: SongRequest[];
   stats: {
     pending: number;
@@ -44,7 +45,7 @@ interface KaraokeContextType extends KaraokeState {
   logout: () => void;
   isLoading: boolean;
   isSessionActive: boolean;
-  toggleSession: () => void;
+  toggleSession: () => Promise<void>;
   resetSystem: () => Promise<void>;
 }
 
@@ -65,7 +66,10 @@ export const KaraokeProvider = ({ children }: { children: ReactNode }) => {
   const [isSessionActive, setIsSessionActive] = useState(true);
   const [user, setUser] = useState<FirebaseUser | null>(null);
   const [isAdminUser, setIsAdminUser] = useState(false);
-  const [isLoading, setIsLoading] = useState(true);
+  const [tablesLoaded, setTablesLoaded] = useState(false);
+  const [queueLoaded, setQueueLoaded] = useState(false);
+  const [settingsLoaded, setSettingsLoaded] = useState(false);
+  const [authLoaded, setAuthLoaded] = useState(false);
 
   // Sync Tables and Queue
   useEffect(() => {
@@ -81,12 +85,10 @@ export const KaraokeProvider = ({ children }: { children: ReactNode }) => {
           return numA - numB;
         }));
       }
-      // If we already have a queue snap, we can stop loading. 
-      // But actually, it's safer to just set it here too.
-      setIsLoading(false);
+      setTablesLoaded(true);
     }, (err) => {
       console.error("Tables listener error:", err);
-      setIsLoading(false);
+      setTablesLoaded(true);
     });
 
     const unsubQueue = onSnapshot(
@@ -96,10 +98,10 @@ export const KaraokeProvider = ({ children }: { children: ReactNode }) => {
         console.log(`Received ${queueData.length} song requests from Firestore`);
         // Sort locally to avoid index requirements
         setQueue(queueData.sort((a, b) => a.createdAt - b.createdAt));
-        setIsLoading(false);
+        setQueueLoaded(true);
       }, (err) => {
         console.error("Queue listener error:", err);
-        setIsLoading(false);
+        setQueueLoaded(true);
       }
     );
 
@@ -107,31 +109,44 @@ export const KaraokeProvider = ({ children }: { children: ReactNode }) => {
       if (snap.exists()) {
         setIsSessionActive(snap.data().isSessionActive);
       }
+      setSettingsLoaded(true);
+    }, (err) => {
+      console.error("Settings listener error:", err);
+      setSettingsLoaded(true);
     });
 
     const unsubAuth = onAuthStateChanged(auth, async (u) => {
       console.log("Auth state changed:", u?.email || "Guest");
-      if (!u) {
+      try {
+        if (!u) {
+          setUser(null);
+          setIsAdminUser(false);
+          return;
+        }
+
+        const adminSnapshot = await getDoc(doc(db, 'admins', u.uid));
+        if (!adminSnapshot.exists()) {
+          setUser(null);
+          setIsAdminUser(false);
+          await signOut(auth);
+          return;
+        }
+
+        setUser(u);
+        setIsAdminUser(true);
+      } catch (error) {
+        console.error("Admin authorization check failed:", error);
         setUser(null);
         setIsAdminUser(false);
-        return;
+      } finally {
+        setAuthLoaded(true);
       }
-
-      const adminSnapshot = await getDoc(doc(db, 'admins', u.uid));
-      if (!adminSnapshot.exists()) {
-        setUser(null);
-        setIsAdminUser(false);
-        await signOut(auth);
-        return;
-      }
-
-      setUser(u);
-      setIsAdminUser(true);
     });
 
     return () => {
       unsubTables();
       unsubQueue();
+      unsubSettings();
       unsubAuth();
     };
   }, []);
@@ -238,26 +253,30 @@ export const KaraokeProvider = ({ children }: { children: ReactNode }) => {
 
   const resetSystem = async () => {
     try {
-      const batch = writeBatch(db);
-      
-      // 1. Delete all song requests
+      // Keep every commit below Firestore's 500-operation batch ceiling.
+      // A long event can easily exceed that limit when the full history is reset.
+      const safeBatchSize = 450;
+
       const songSnap = await getDocs(collection(db, 'songRequests'));
-      songSnap.docs.forEach((doc) => {
-        batch.delete(doc.ref);
-      });
+      for (const songChunk of chunkItems(songSnap.docs, safeBatchSize)) {
+        const songBatch = writeBatch(db);
+        songChunk.forEach(songDoc => songBatch.delete(songDoc.ref));
+        await songBatch.commit();
+      }
 
-      // 2. Reset counts for all tables
       const tablesSnap = await getDocs(collection(db, 'tables'));
-      tablesSnap.docs.forEach((d) => {
-        batch.update(d.ref, { 
-          songsSungCount: 0,
-          pendingSongCount: 0,
-          lastSungAt: deleteField(),
-          joinedAt: deleteField()
+      for (const tableChunk of chunkItems(tablesSnap.docs, safeBatchSize)) {
+        const tableBatch = writeBatch(db);
+        tableChunk.forEach(tableDoc => {
+          tableBatch.update(tableDoc.ref, {
+            songsSungCount: 0,
+            pendingSongCount: 0,
+            lastSungAt: deleteField(),
+            joinedAt: deleteField()
+          });
         });
-      });
-
-      await batch.commit();
+        await tableBatch.commit();
+      }
       console.log("System reset successfully");
     } catch (error) {
       console.error("Error resetting system:", error);
@@ -334,6 +353,7 @@ export const KaraokeProvider = ({ children }: { children: ReactNode }) => {
   };
 
   const fairQueue = getNextSongs(queue, tables);
+  const isLoading = !tablesLoaded || !queueLoaded || !settingsLoaded || !authLoaded;
 
   const processedRequests = queue.filter(
     request => (request.status === 'sung' || request.status === 'no_show' || request.status === 'removed')
