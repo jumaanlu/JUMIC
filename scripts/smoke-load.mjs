@@ -46,6 +46,31 @@ async function worker() {
 
 await Promise.all(Array.from({ length: Math.min(concurrency, totalRequests) }, () => worker()));
 
+for (const extension of ['js', 'css']) {
+  const response = await fetch(`${baseUrl}/assets/index-stale-readiness-check.${extension}`, {
+    headers: { 'user-agent': 'JUMIC-event-readiness-check/1.0' },
+    signal: AbortSignal.timeout(15_000),
+  });
+  const body = await response.text();
+  const contentType = response.headers.get('content-type') || '';
+  const cacheControl = response.headers.get('cache-control') || '';
+  const expectedContentType = extension === 'js' ? 'javascript' : 'text/css';
+
+  if (
+    !response.ok
+    || !contentType.includes(expectedContentType)
+    || !cacheControl.includes('no-store')
+    || body.length < 100
+    || body.includes('<div id="root"></div>')
+  ) {
+    failures.push({
+      route: `/assets/index-stale-readiness-check.${extension}`,
+      status: response.status,
+      reason: 'stale asset fallback is not safe',
+    });
+  }
+}
+
 latencies.sort((a, b) => a - b);
 const percentile = value => latencies[Math.min(latencies.length - 1, Math.floor(latencies.length * value))] || 0;
 const result = {
